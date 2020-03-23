@@ -1,0 +1,129 @@
+---
+- name: Deploy apache nginx settings
+  hosts:
+    all
+  become: yes
+  become_user: root
+
+  vars:
+    repo_path: /tmp/ansible
+    httpd_conf_source_path: "{{repo_path}}/httpd.conf"
+    nginx_conf_source_path: "{{repo_path}}/nginx.conf"
+    ssl_conf_source_path: "{{repo_path}}/ssl.conf"
+    httpd_conf_dest_path: /etc/httpd/conf/httpd.conf
+    nginx_conf_dest_path: /etc/nginx/nginx.conf
+    cert_key_dest_path: /home/apache
+    ssl_conf_dest_path: /etc/httpd/conf.d/ssl.conf
+    epel_repo_dest: /etc/yum.repos.d/epel.repo
+
+
+  tasks:
+    - name: install packages
+      yum: name={{ item }} state=latest
+      with_items:
+        - httpd
+        - epel-release
+        - mod_ssl
+        - policycoreutils-python
+        - openssl
+        - git
+
+    - name: Install Nginx webserver from epel repo
+      yum: name=nginx state=latest
+
+
+    - name: Clone configs repository
+      git:
+        repo: https://github.com/paganism/ansible_deploy_apache_nginx
+        dest: "{{ repo_path }}"
+
+
+    - name: Сreate cert directory
+      file:
+        path: "{{ cert_key_dest_path }}"
+        state: directory
+    
+
+    - name: Generate ssl certificate
+      shell: |
+         openssl req -x509 -nodes -days 5 -newkey rsa:2048 -keyout {{ cert_key_dest_path }}/test.domain.space.key \
+         -out {{ cert_key_dest_path }}/test.domain.space.crt -subj '/C=RU/ST=DPb/L=SPb/CN=test.domain.space'
+
+
+    - name: Modify SE permitions
+      shell:
+        cmd: restorecon -Rv {{ cert_key_dest_path }}
+
+
+    - name: Allow webserver to listen on 8443 (selinux)
+      seport:
+        ports: 8443
+        proto: tcp
+        setype: http_port_t
+        state: present
+
+
+    - name: Allow webserver to listen on 843 (selinux)
+      seport:
+        ports: 843
+        proto: tcp
+        setype: http_port_t
+        state: present
+
+
+    - name: Set httpd_can_network_connect flag on and keep it persistent across reboots
+      seboolean:
+        name: httpd_can_network_connect
+        state: yes
+        persistent: yes
+
+  
+    - name: Set httpd_can_network_connect flag on and keep it persistent across reboots
+      seboolean:
+        name: httpd_read_user_content
+        state: yes
+        persistent: yes
+
+
+    - name: Allow new incoming connections on TCP port 8443
+      iptables:
+        chain: IN_public_allow
+        protocol: tcp
+        destination_port: 8443
+        ctstate: NEW,UNTRACKED
+        jump: ACCEPT
+        action: insert
+        comment: Accept new connections to 8443
+      register: hvg
+
+      
+    - name: Copy Certificates and Configs
+      copy: 
+        src: "{{ item.src }}"
+        dest: "{{ item.dest }}"
+        mode: 0644
+        remote_src: yes 
+        force: yes
+      with_items:       
+        - { src: '{{ httpd_conf_source_path }}', dest: '{{ httpd_conf_dest_path }}' }
+        - { src: '{{ nginx_conf_source_path }}', dest: '{{ nginx_conf_dest_path }}' }   
+        - { src: '{{ ssl_conf_source_path }}',   dest: '{{ ssl_conf_dest_path }}' }
+      
+
+    - name: Replace server name in nginx config
+      lineinfile: 
+        dest: "{{ nginx_conf_dest_path }}"
+        regexp: 'server_name  localhost;' 
+        line: "        server_name  {{ansible_default_ipv4.address}};"
+        backrefs: yes
+      notify:
+        - restart apache
+        - restart nginx 
+
+
+  handlers:
+  - name: restart apache
+    service: name=httpd state=restarted enabled=yes
+
+  - name: restart nginx
+    service: name=nginx state=restarted enabled=yes

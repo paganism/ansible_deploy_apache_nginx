@@ -1,0 +1,2 @@
+[prod_servers]
+linux1 ansible_host=your_id_address
